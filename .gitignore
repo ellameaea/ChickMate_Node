@@ -1,0 +1,4 @@
+.env
+*.json
+!package.json
+chickmate-ef0a0-firebase-adminsdk-fbsvc-668ff5179d.json
