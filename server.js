@@ -18,7 +18,6 @@ app.listen(3000, "0.0.0.0", () => {
   console.log("Server is running...");
 });
 
-// ✅ Utility: validate timestamp
 function validateTimestamp(ts, lastTs) {
   if (!ts) {
     throw new Error("Timestamp missing");
@@ -93,6 +92,15 @@ async function start() {
       return;
     }
     if (
+      typeof sensorData.temperature !== "number" ||
+      typeof sensorData.humidity !== "number" ||
+      typeof sensorData.ammonia !== "number" ||
+      typeof sensorData.lightLevel !== "number"
+    ) {
+      console.warn("⚠️ Invalid sensor payload: non-numeric values detected");
+      return;
+    }
+    if (
       sensorData.temperature < 0 ||
       sensorData.humidity < 0 ||
       sensorData.ammonia < 0 ||
@@ -137,7 +145,11 @@ const handleActuatorData = async (controls) => {
     if (typeof value === "boolean") {
       doc.status = value ? "ON" : "OFF";
     } else if (typeof value === "number") {
-      doc.value = value;
+      if (value < 0 || value > 100) {
+        console.warn(`⚠️ Skipping out-of-range value for ${key}:`, value);
+        continue;
+        }
+        doc.value = value;
     } else {
       console.warn(`⚠️ Skipping unknown control type for ${key}:`, value);
       continue;
