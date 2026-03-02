@@ -4,7 +4,8 @@
 const express = require("express");
 const cors = require("cors");
 const connectMongo = require("./mongo");
-const db = require("./firebase");
+// const db = require("./firebase");
+const { db, admin } = require("./firebase");
 
 const app = express();
 app.use(cors());
@@ -12,11 +13,9 @@ app.use(express.json());
 
 let sensorCollection;
 let actuatorCollection;
+let notificationCollection;
 let lastActuatorData = {};
-
-app.listen(3000, "0.0.0.0", () => {
-  console.log("Server is running...");
-});
+let tokenCollection;
 
 function validateTimestamp(ts, lastTs) {
   if (!ts) {
@@ -66,63 +65,119 @@ async function start() {
   const mongoDB = await connectMongo();
   sensorCollection = mongoDB.collection("sensor_readings");
   actuatorCollection = mongoDB.collection("actuator_events");
+  notificationCollection = mongoDB.collection("notifications");
   console.log("✅ Connected to MongoDB Atlas");
 
   const rootRef = db.ref("/");
 
+  tokenCollection = mongoDB.collection("device_tokens");
+
   let lastSensorTimestamp = null;
-  
+
+  const SENSOR_LABELS = {
+  temperature: "SHT31 - Temperature Sensor",
+  humidity: "SHT31 - Humidity Sensor",
+  ammonia: "MQ13 - Ammonia Sensor",
+  lightLevel: "BH1750 - Light Sensor"
+};
+
   // ----- Handle sensor data -----
-  const handleSensorData = async (sensorData) => {
-    try {
-    const now = new Date();
-    const ts = getManilaISO(now);
-
-    // ✅ Timestamp validation
+const handleSensorData = async (sensorData) => {
+  try {
+    const ts = getManilaISO(new Date());
     validateTimestamp(ts, lastSensorTimestamp);
+    lastSensorTimestamp = ts;
 
-    // ✅ Integrity checks
-    if (
-      sensorData.temperature == null ||
-      sensorData.humidity == null ||
-      sensorData.ammonia == null ||
-      sensorData.lightLevel == null
-    ) {
-      console.warn("⚠️ Invalid sensor payload: contains null values");
-      return;
-    }
-    if (
-      typeof sensorData.temperature !== "number" ||
-      typeof sensorData.humidity !== "number" ||
-      typeof sensorData.ammonia !== "number" ||
-      typeof sensorData.lightLevel !== "number"
-    ) {
-      console.warn("⚠️ Invalid sensor payload: non-numeric values detected");
-      return;
-    }
-    if (
-      sensorData.temperature < 0 ||
-      sensorData.humidity < 0 ||
-      sensorData.ammonia < 0 ||
-      sensorData.lightLevel < 0
-    ) {
-      console.warn("⚠️ Invalid sensor payload: contains negative readings");
-      return;
+    const readings = {};
+
+    for (const [key, value] of Object.entries(sensorData)) {
+      const sensorName = SENSOR_LABELS[key] ?? key;
+
+      const isInvalid =
+        value === "Error: Read Failure" ||
+        value === "Error: Disconnected" ||
+        value == null ||
+        typeof value !== "number" ||
+        Number.isNaN(value) ||
+        value < 0;
+
+      // readings[key] = isInvalid ? null : value;
+      readings[key] = value;
+
+      const activeFailure = await notificationCollection.findOne({
+        type: "SENSOR FAILURE",
+        sensor: sensorName,
+        resolved: false
+      });
+
+      const sensorMessage = 
+      value === "Error: Read Failure" ? "Error: Read Failure" :
+      value === "Error: Disconnected" ? "Error: Disconnected" :
+      null;
+
+      // 🔔 FAIL → create notification
+      if (isInvalid && !activeFailure) {
+        await notificationCollection.insertOne({
+          type: "SENSOR FAILURE",
+          sensor: sensorName,
+          message: sensorMessage,
+          severity: "HIGH",
+          is_read: false,
+          resolved: false,
+          created_at: ts
+        });
+
+        console.warn(`❌ SENSOR FAILURE DETECTED: ${sensorName}`);
+        console.warn(`❌ SENSOR FAILURE DETECTED: ${sensorName}`);
+
+        // 🔔 SEND PUSH NOTIFICATION
+        const tokens = await tokenCollection.find({}).toArray();
+
+        for (const device of tokens) {
+          try {
+            await admin.messaging().send({
+              token: device.token,
+              notification: {
+                title: "⚠️ SENSOR FAILURE",
+                body: `${sensorName} is not responding`
+              },
+              android: {
+                priority: "high"
+              }
+            });
+
+            console.log(`📲 Push sent to: ${device.token}`);
+
+          } catch (err) {
+            console.error("Push error:", err.message);
+          }
+        }
+      }
+
+      // ✅ RECOVERY → resolve notification
+      if (!isInvalid && activeFailure) {
+        await notificationCollection.updateOne(
+          { _id: activeFailure._id },
+          { $set: { resolved: true, resolved_at: ts } }
+        );
+
+        console.log(`✅ SENSOR RECOVERED: ${sensorName}`);
+      }
     }
 
-    const doc = {
+    // Always store snapshot
+    await sensorCollection.insertOne({
       timestamp: ts,
-      temperature: sensorData.temperature,
-      humidity: sensorData.humidity,
-      ammonia: sensorData.ammonia,
-      light: sensorData.lightLevel,
-    };
-      await sensorCollection.insertOne(doc);
-      console.log("✅ Sensor data inserted:", doc);
-    } catch (err) {
-      console.error("❌ Error writing sensor data:", err);
-    }
-  };
+      temperature: readings.temperature,
+      humidity: readings.humidity,
+      ammonia: readings.ammonia,
+      light: readings.lightLevel
+    });
+
+  } catch (err) {
+    console.error("❌ Error writing sensor data:", err);
+  }
+};
 
   // ----- Handle actuator data -----
 const handleActuatorData = async (controls) => {
@@ -225,7 +280,73 @@ const handleActuatorData = async (controls) => {
   });
 }
 
+// GET /api/notifications/unread-count
+
+app.post("/api/save-token", async (req, res) => {
+  try {
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ error: "Token missing" });
+    }
+
+    await tokenCollection.updateOne(
+      { token },
+      { $set: { token, createdAt: new Date() } },
+      { upsert: true }
+    );
+
+    res.json({ message: "Token saved" });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
 // ✅ API routes for Flutter
+app.get("/api/notifications", async (req, res) => {
+  try {
+    const notifications = await notificationCollection
+      .find({})
+      .sort({ created_at: -1 }) // newest first
+      .toArray();
+
+    res.json(notifications);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/notifications/unread-count", async (req, res) => {
+  try {
+    const count = await notificationCollection.countDocuments({
+      is_read: false
+    });
+
+    res.json({ unreadCount: count });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/notifications/mark-all-read
+app.put("/api/notifications/mark-all-read", async (req, res) => {
+  try {
+    const result = await notificationCollection.updateMany(
+      { is_read: false },
+      { $set: { is_read: true } }
+    );
+
+    res.json({
+      message: "Notifications marked as read",
+      modified: result.modifiedCount
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/api/sensors", async (req, res) => {
   try {
     const sensors = await sensorCollection.find({}).sort({ timestamp: -1 }).toArray();
@@ -244,8 +365,12 @@ app.get("/api/actuators", async (req, res) => {
   }
 });
 
-// ✅ Start server
+// const PORT = 5000;
+// app.listen(PORT, () => console.log(`🚀 Server running at http://localhost:${PORT}`));
+
 const PORT = 5000;
-app.listen(PORT, () => console.log(`🚀 Server running at http://localhost:${PORT}`));
+app.listen(PORT, "0.0.0.0", () =>
+  console.log(`🚀 Server running at http://0.0.0.0:${PORT}`)
+);
 
 start().catch(console.error);
