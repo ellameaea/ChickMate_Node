@@ -174,6 +174,13 @@ const handleSensorData = async (sensorData) => {
       light: readings.lightLevel
     });
 
+    // after sensorCollection is defined in start()
+    await sensorCollection.createIndex(
+    { timestamp: 1 },
+    { expireAfterSeconds: 604800 } // 7 days
+    );
+    console.log("🕒 TTL index created for 7-day auto-deletion");
+
   } catch (err) {
     console.error("❌ Error writing sensor data:", err);
   }
