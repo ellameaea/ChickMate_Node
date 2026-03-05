@@ -68,6 +68,13 @@ async function start() {
   notificationCollection = mongoDB.collection("notifications");
   console.log("✅ Connected to MongoDB Atlas");
 
+  // after sensorCollection is defined in start()
+    await sensorCollection.createIndex(
+    { timestamp: 1 },
+    { expireAfterSeconds: 604800 } // 7 days
+    );
+    console.log("🕒 TTL index created for 7-day auto-deletion");
+
   const rootRef = db.ref("/");
 
   tokenCollection = mongoDB.collection("device_tokens");
@@ -150,6 +157,11 @@ const handleSensorData = async (sensorData) => {
 
           } catch (err) {
             console.error("Push error:", err.message);
+
+            if (err.code === "messaging/registration-token-not-registered") {
+              await tokenCollection.deleteOne({ token: device.token });
+              console.log("🧹 Removed invalid token:", device.token);
+            }
           }
         }
       }
@@ -173,13 +185,6 @@ const handleSensorData = async (sensorData) => {
       ammonia: readings.ammonia,
       light: readings.lightLevel
     });
-
-    // after sensorCollection is defined in start()
-    await sensorCollection.createIndex(
-    { timestamp: 1 },
-    { expireAfterSeconds: 604800 } // 7 days
-    );
-    console.log("🕒 TTL index created for 7-day auto-deletion");
 
   } catch (err) {
     console.error("❌ Error writing sensor data:", err);
@@ -229,7 +234,7 @@ const handleActuatorData = async (controls) => {
 
   // ----- Payload type checks -----
   const isSensorPayload = (data) =>
-    "temperature" in data || "humidity" in data || "ammonia" in data || "light" in data;
+    "temperature" in data || "humidity" in data || "ammonia" in data || "lightLevel" in data;
 
   const isActuatorPayload = (data) =>
     "exhaustFan" in data || "heater" in data || "intakeFan" in data;
