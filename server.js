@@ -16,48 +16,38 @@ let actuatorCollection;
 let notificationCollection;
 let lastActuatorData = {};
 let tokenCollection;
+let cachedTokens = null;
+
+async function getTokens() {
+  if (cachedTokens) return cachedTokens;
+  cachedTokens = await tokenCollection.find({}).toArray();
+  return cachedTokens;
+}
+
+function invalidateTokenCache() {
+  cachedTokens = null;
+}
 
 function validateTimestamp(ts, lastTs) {
-  if (!ts) {
-    throw new Error("Timestamp missing");
+  const date = ts instanceof Date ? ts : new Date(ts);
+
+  if (isNaN(date.getTime())) {
+    throw new Error("Invalid timestamp");
   }
 
-  // Check format: must be ISO 8601
-  if (isNaN(Date.parse(ts))) {
-    throw new Error("Timestamp not correctly formatted");
-  }
-
-  const date = new Date(ts);
   const now = new Date();
 
-  // No future dates
+  // Prevent future timestamps
   if (date > now) {
     throw new Error("Timestamp is in the future");
   }
 
-  // Monotonic check: must be >= last known timestamp
+  // Ensure monotonic increase
   if (lastTs && date < new Date(lastTs)) {
-    throw new Error("Timestamp is not monotonic (older than last record)");
+    throw new Error("Timestamp is not monotonic");
   }
 
   return true;
-}
-
-// helper: produce an ISO-like timestamp in Asia/Manila with +08:00 offset
-function getManilaISO(date = new Date()) {
-  // use Intl to get zero-padded components in Manila timezone
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Manila',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-    hour12: false
-  }).formatToParts(date);
-
-  const map = {};
-  parts.forEach(p => { if (p.type !== 'literal') map[p.type] = p.value; });
-
-  // compose ISO-like string with +08:00 offset
-  return `${map.year}-${map.month}-${map.day}T${map.hour}:${map.minute}:${map.second}+08:00`;
 }
 
 // ✅ Connect to MongoDB and Firebase
@@ -68,10 +58,13 @@ async function start() {
   notificationCollection = mongoDB.collection("notifications");
   console.log("✅ Connected to MongoDB Atlas");
 
-  // after sensorCollection is defined in start()
     await sensorCollection.createIndex(
     { timestamp: 1 },
-    { expireAfterSeconds: 604800 } // 7 days
+    { expireAfterSeconds: 604800 } 
+    );
+    await actuatorCollection.createIndex(
+      { timestamp: 1 },
+      { expireAfterSeconds: 604800 }
     );
     console.log("🕒 TTL index created for 7-day auto-deletion");
 
@@ -80,6 +73,7 @@ async function start() {
   tokenCollection = mongoDB.collection("device_tokens");
 
   let lastSensorTimestamp = null;
+  let lastActuatorTimestamp = null;
 
   const SENSOR_LABELS = {
   temperature: "SHT31 - Temperature Sensor",
@@ -91,7 +85,8 @@ async function start() {
   // ----- Handle sensor data -----
 const handleSensorData = async (sensorData) => {
   try {
-    const ts = getManilaISO(new Date());
+    // const ts = getManilaISO(new Date());
+    const ts = new Date();
     validateTimestamp(ts, lastSensorTimestamp);
     lastSensorTimestamp = ts;
 
@@ -102,13 +97,10 @@ const handleSensorData = async (sensorData) => {
 
       const isInvalid =
         value === "Error: Read Failure" ||
-        value === "Error: Disconnected" ||
         value == null ||
         typeof value !== "number" ||
-        Number.isNaN(value) ||
-        value < 0;
+        Number.isNaN(value);
 
-      // readings[key] = isInvalid ? null : value;
       readings[key] = value;
 
       const activeFailure = await notificationCollection.findOne({
@@ -122,7 +114,6 @@ const handleSensorData = async (sensorData) => {
       value === "Error: Disconnected" ? "Error: Disconnected" :
       null;
 
-      // 🔔 FAIL → create notification
       if (isInvalid && !activeFailure) {
         await notificationCollection.insertOne({
           type: "SENSOR FAILURE",
@@ -135,10 +126,10 @@ const handleSensorData = async (sensorData) => {
         });
 
         console.warn(`❌ SENSOR FAILURE DETECTED: ${sensorName}`);
-        console.warn(`❌ SENSOR FAILURE DETECTED: ${sensorName}`);
 
         // 🔔 SEND PUSH NOTIFICATION
-        const tokens = await tokenCollection.find({}).toArray();
+        // const tokens = await tokenCollection.find({}).toArray();
+        const tokens = await getTokens()
 
         for (const device of tokens) {
           try {
@@ -159,6 +150,7 @@ const handleSensorData = async (sensorData) => {
             console.error("Push error:", err.message);
             if (err.code === "messaging/registration-token-not-registered") {
               await tokenCollection.deleteOne({ token: device.token });
+              invalidateTokenCache();
               console.log("🧹 Removed invalid token:", device.token);
             }
           }
@@ -192,42 +184,50 @@ const handleSensorData = async (sensorData) => {
 
   // ----- Handle actuator data -----
 const handleActuatorData = async (controls) => {
-  const actuatorDocs = [];
+  try {
+    const actuatorDocs = [];
+    const pendingUpdates = {};
 
-  for (const [key, value] of Object.entries(controls)) {
-    const lastValue = lastActuatorData[key];
-    if (lastValue === value) {
-      console.log(`⏸ ${key} unchanged — skipping`);
-      continue;
-    }
-
-    const ts = getManilaISO(new Date());
-
-    const doc = {
-      actuator_id: key,
-      timestamp: ts
-    };
-
-    if (typeof value === "boolean") {
-      doc.status = value ? "ON" : "OFF";
-    } else if (typeof value === "number") {
-      if (value < 0 || value > 100) {
-        console.warn(`⚠️ Skipping out-of-range value for ${key}:`, value);
+    for (const [key, value] of Object.entries(controls)) {
+      const lastValue = lastActuatorData[key];
+      if (lastValue === value) {
+        console.log(`⏸ ${key} unchanged — skipping`);
         continue;
-        }
-        doc.value = value;
-    } else {
-      console.warn(`⚠️ Skipping unknown control type for ${key}:`, value);
-      continue;
+      }
+
+      const ts = new Date();
+      validateTimestamp(ts, lastActuatorTimestamp);
+      lastActuatorTimestamp = ts;
+
+      const doc = {
+        actuator_id: key,
+        timestamp: ts
+      };
+
+      if (typeof value === "boolean") {
+        doc.status = value ? "ON" : "OFF";
+      } else if (typeof value === "number") {
+        if (value < 0 || value > 100) {
+          console.warn(`⚠️ Skipping out-of-range value for ${key}:`, value);
+          continue;
+          }
+          doc.value = value;
+      } else {
+        console.warn(`⚠️ Skipping unknown control type for ${key}:`, value);
+        continue;
+      }
+
+        actuatorDocs.push(doc);
+        pendingUpdates[key] = value;
+      }
+
+    if (actuatorDocs.length > 0) {
+      await actuatorCollection.insertMany(actuatorDocs);
+      Object.assign(lastActuatorData, pendingUpdates);
+      console.log("✅ Actuator events inserted:", actuatorDocs);
     }
-
-    actuatorDocs.push(doc);
-    lastActuatorData[key] = value; // update cache
-  }
-
-  if (actuatorDocs.length > 0) {
-    await actuatorCollection.insertMany(actuatorDocs);
-    console.log("✅ Actuator events inserted:", actuatorDocs);
+  } catch (err) {
+    console.error("❌ Error writing actuator data:", err);
   }
 };
 
@@ -238,60 +238,43 @@ const handleActuatorData = async (controls) => {
   const isActuatorPayload = (data) =>
     "exhaustFan" in data || "heater" in data || "intakeFan" in data;
 
-  // ----- Listen for new data -----
+  const handleSnapshot = async (data) => {
+    if (isSensorPayload(data))   await handleSensorData(data);
+    if (isActuatorPayload(data)) await handleActuatorData(data);
+    if (data.sensorData)         await handleSensorData(data.sensorData);
+    if (data.controls)           await handleActuatorData(data.controls);
+  };
+
   rootRef.on("child_added", async (snapshot) => {
     const data = snapshot.val();
     console.log("🟢 New Firebase data:", data);
-
-    if (isSensorPayload(data)) {
-      console.log("📥 Detected flat sensor payload");
-      await handleSensorData(data);
-    }
-
-    if (isActuatorPayload(data)) {
-      console.log("📥 Detected flat actuator payload");
-      await handleActuatorData(data);
-    }
-
-    if (data.sensorData) {
-      console.log("📥 Detected nested sensorData");
-      await handleSensorData(data.sensorData);
-    }
-
-    if (data.controls) {
-      console.log("📥 Detected nested controls");
-      await handleActuatorData(data.controls);
-    }
+    await handleSnapshot(data);
   });
 
-  // ----- Listen for updated data -----
   rootRef.on("child_changed", async (snapshot) => {
     const data = snapshot.val();
     console.log("🔄 Updated Firebase data:", data);
-
-    if (isSensorPayload(data)) {
-      console.log("📥 Detected flat sensor payload");
-      await handleSensorData(data);
-    }
-
-    if (isActuatorPayload(data)) {
-      console.log("📥 Detected flat actuator payload");
-      await handleActuatorData(data);
-    }
-
-    if (data.sensorData) {
-      console.log("📥 Detected nested sensorData");
-      await handleSensorData(data.sensorData);
-    }
-
-    if (data.controls) {
-      console.log("📥 Detected nested controls");
-      await handleActuatorData(data.controls);
-    }
+    await handleSnapshot(data);
   });
+  
+  const PORT = 5000;
+  app.listen(PORT, "0.0.0.0", () =>
+    console.log(`🚀 Server running at http://0.0.0.0:${PORT}`)
+  );
+
+  const shutdown = async (signal) => {
+      console.log(`⚙️ ${signal} received — shutting down`);
+      rootRef.off();
+      await mongoDB.client.close();
+      console.log("✅ MongoDB closed");
+      process.exit(0);
+    };
+
+    process.on("SIGTERM", () => shutdown("SIGTERM"));
+    process.on("SIGINT",  () => shutdown("SIGINT"));
 }
 
-// GET /api/notifications/unread-count
+start().catch(console.error);
 
 app.post("/api/save-token", async (req, res) => {
   try {
@@ -306,6 +289,7 @@ app.post("/api/save-token", async (req, res) => {
       { $set: { token, createdAt: new Date() } },
       { upsert: true }
     );
+    invalidateTokenCache();
 
     res.json({ message: "Token saved" });
 
@@ -375,13 +359,3 @@ app.get("/api/actuators", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-// const PORT = 5000;
-// app.listen(PORT, () => console.log(`🚀 Server running at http://localhost:${PORT}`));
-
-const PORT = 5000;
-app.listen(PORT, "0.0.0.0", () =>
-  console.log(`🚀 Server running at http://0.0.0.0:${PORT}`)
-);
-
-start().catch(console.error);
