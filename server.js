@@ -236,7 +236,7 @@ const handleActuatorData = async (controls) => {
     "temperature" in data || "humidity" in data || "ammonia" in data || "lightLevel" in data;
 
   const isActuatorPayload = (data) =>
-    "exhaustFan" in data || "heater" in data || "intakeFan" in data;
+    "fans" in data || "heater" in data || "lightBrightness" in data;
 
   const handleSnapshot = async (data) => {
     if (isSensorPayload(data))   await handleSensorData(data);
