@@ -58,15 +58,20 @@ async function start() {
   notificationCollection = mongoDB.collection("notifications");
   console.log("✅ Connected to MongoDB Atlas");
 
-    await sensorCollection.createIndex(
+  await sensorCollection.createIndex(
+  { timestamp: 1 },
+  { expireAfterSeconds: 604800 } 
+  );
+  await actuatorCollection.createIndex(
     { timestamp: 1 },
-    { expireAfterSeconds: 604800 } 
-    );
-    await actuatorCollection.createIndex(
-      { timestamp: 1 },
-      { expireAfterSeconds: 604800 }
-    );
-    console.log("🕒 TTL index created for 7-day auto-deletion");
+    { expireAfterSeconds: 604800 }
+  );
+  console.log("🕒 TTL index created for 7-day auto-deletion");
+
+  await actuatorCollection.createIndex({ actuator_id: 1, timestamp: -1 });
+  await notificationCollection.createIndex({ type: 1, sensor: 1, resolved: 1 });
+  await notificationCollection.createIndex({ is_read: 1 });
+  await notificationCollection.createIndex({ created_at: -1 });
 
   const rootRef = db.ref("/");
 
@@ -344,7 +349,19 @@ app.put("/api/notifications/mark-all-read", async (req, res) => {
 
 app.get("/api/sensors", async (req, res) => {
   try {
-    const sensors = await sensorCollection.find({}).sort({ timestamp: -1 }).toArray();
+    const limit = Math.min(parseInt(req.query.limit) || 500, 10000);
+    const skip  = parseInt(req.query.skip) || 0;
+    const since = req.query.since ? new Date(req.query.since) : null;
+
+    const filter = since ? { timestamp: { $gte: since } } : {};
+
+    const sensors = await sensorCollection
+      .find(filter)
+      .sort({ timestamp: -1 })
+      .skip(skip)
+      .limit(limit)
+      .toArray();
+
     res.json(sensors);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -353,7 +370,22 @@ app.get("/api/sensors", async (req, res) => {
 
 app.get("/api/actuators", async (req, res) => {
   try {
-    const actuators = await actuatorCollection.find({}).sort({ timestamp: -1 }).toArray();
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+    const skip  = parseInt(req.query.skip) || 0;
+    const since = req.query.since ? new Date(req.query.since) : null;
+    const id    = req.query.actuator_id || null;
+
+    const filter = {};
+    if (since) filter.timestamp = { $gte: since };
+    if (id)    filter.actuator_id = id;
+
+    const actuators = await actuatorCollection
+      .find(filter)
+      .sort({ timestamp: -1 })
+      .skip(skip)
+      .limit(limit)
+      .toArray();
+
     res.json(actuators);
   } catch (err) {
     res.status(500).json({ error: err.message });
