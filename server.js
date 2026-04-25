@@ -32,19 +32,22 @@ function validateTimestamp(ts, lastTs) {
   const date = ts instanceof Date ? ts : new Date(ts);
 
   if (isNaN(date.getTime())) {
-    throw new Error("Invalid timestamp");
+    console.error("⚠️ Invalid timestamp received.");
+    return false;
   }
 
   const now = new Date();
 
   // Prevent future timestamps
   if (date > now) {
-    throw new Error("Timestamp is in the future");
+    console.warn("⚠️ Skipping: Timestamp is in the future.");
+    return false;
   }
 
   // Ensure monotonic increase
   if (lastTs && date < new Date(lastTs)) {
-    throw new Error("Timestamp is not monotonic");
+    console.warn("⚠️ Skipping: Out-of-order packet detected (non-monotonic).");
+    return false;
   }
 
   return true;
@@ -81,18 +84,19 @@ async function start() {
   let lastActuatorTimestamp = null;
 
   const SENSOR_LABELS = {
-  temperature: "SHT31 - Temperature Sensor",
-  humidity: "SHT31 - Humidity Sensor",
-  ammonia: "MQ13 - Ammonia Sensor",
-  lightLevel: "BH1750 - Light Sensor"
-};
+    temperature: "SHT31 - Temperature Sensor",
+    humidity: "SHT31 - Humidity Sensor",
+    ammonia: "MQ13 - Ammonia Sensor",
+    lightLevel: "BH1750 - Light Sensor"
+  };
 
   // ----- Handle sensor data -----
 const handleSensorData = async (sensorData) => {
   try {
     // const ts = getManilaISO(new Date());
     const ts = new Date();
-    validateTimestamp(ts, lastSensorTimestamp);
+    const isValid = validateTimestamp(ts, lastSensorTimestamp);
+    if (!isValid) return;
     lastSensorTimestamp = ts;
 
     const readings = {};
@@ -201,7 +205,8 @@ const handleActuatorData = async (controls) => {
       }
 
       const ts = new Date();
-      validateTimestamp(ts, lastActuatorTimestamp);
+      const isValid = validateTimestamp(ts, lastActuatorTimestamp);
+      if (!isValid) continue;
       lastActuatorTimestamp = ts;
 
       const doc = {
@@ -237,19 +242,39 @@ const handleActuatorData = async (controls) => {
 };
 
   // ----- Payload type checks -----
-  const isSensorPayload = (data) =>
-    "temperature" in data || "humidity" in data || "ammonia" in data || "lightLevel" in data;
+  const isSensorPayload = (data) => 
+    data && typeof data === 'object' && !Array.isArray(data) &&
+    ("temperature" in data || "humidity" in data || "ammonia" in data || "lightLevel" in data);
 
-  const isActuatorPayload = (data) =>
-    "fans" in data || "heater" in data || "lightBrightness" in data;
+  const isActuatorPayload = (data) => 
+    data && typeof data === 'object' && !Array.isArray(data) &&
+    ("fans" in data || "heater" in data || "lightBrightness" in data);
 
+  // --- SNAPSHOT HANDLER ---
   const handleSnapshot = async (data) => {
-    if (isSensorPayload(data))   await handleSensorData(data);
-    if (isActuatorPayload(data)) await handleActuatorData(data);
-    if (data.sensorData)         await handleSensorData(data.sensorData);
-    if (data.controls)           await handleActuatorData(data.controls);
+    if (!data || typeof data !== 'object') return;
+
+    try {
+      // Process sensors (prioritize nested sensorData if it exists)
+      if (data.sensorData && isSensorPayload(data.sensorData)) {
+        await handleSensorData(data.sensorData);
+      } else if (isSensorPayload(data)) {
+        await handleSensorData(data);
+      }
+
+      // Process actuators (prioritize nested controls if it exists)
+      if (data.controls && isActuatorPayload(data.controls)) {
+        await handleActuatorData(data.controls);
+      } else if (isActuatorPayload(data)) {
+        await handleActuatorData(data);
+      }
+    } catch (err) {
+      console.error("⚠️ Failed to process snapshot branch:", err.message);
+    }
   };
 
+  // --- REFINED LISTENERS ---
+  // Listening to specific nodes instead of root "/"
   rootRef.on("child_added", async (snapshot) => {
     const data = snapshot.val();
     console.log("🟢 New Firebase data:", data);
