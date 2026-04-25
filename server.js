@@ -376,9 +376,18 @@ app.get("/api/sensors", async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 500, 10000);
     const skip  = parseInt(req.query.skip) || 0;
-    const since = req.query.since ? new Date(req.query.since) : null;
 
-    const filter = since ? { timestamp: { $gte: since } } : {};
+    const since = req.query.since ? new Date(req.query.since) : null;
+    const until = req.query.until ? new Date(req.query.until) : null;
+
+    let filter = {};
+    if (since || until) {
+      filter.timestamp = {};
+      if (since) filter.timestamp.$gte = since; 
+      if (until) filter.timestamp.$lt = until;  
+    }
+
+    // const filter = since ? { timestamp: { $gte: since } } : {};
 
     const sensors = await sensorCollection
       .find(filter)
@@ -397,12 +406,22 @@ app.get("/api/actuators", async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 100, 500);
     const skip  = parseInt(req.query.skip) || 0;
-    const since = req.query.since ? new Date(req.query.since) : null;
     const id    = req.query.actuator_id || null;
 
-    const filter = {};
-    if (since) filter.timestamp = { $gte: since };
-    if (id)    filter.actuator_id = id;
+    const since = req.query.since ? new Date(req.query.since) : null;
+    const until = req.query.until ? new Date(req.query.until) : null;
+
+    let filter = {};
+    if (since || until) {
+      filter.timestamp = {};
+      if (since) filter.timestamp.$gte = since; 
+      if (until) filter.timestamp.$lt = until;  
+      if (id)    filter.actuator_id = id;
+    }
+
+    // const filter = {};
+    // if (since) filter.timestamp = { $gte: since };
+    // if (id)    filter.actuator_id = id;
 
     const actuators = await actuatorCollection
       .find(filter)
