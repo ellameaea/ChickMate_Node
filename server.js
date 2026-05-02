@@ -104,24 +104,16 @@ const handleSensorData = async (sensorData) => {
     for (const [key, value] of Object.entries(sensorData)) {
       const sensorName = SENSOR_LABELS[key] ?? key;
 
-      const isInvalid =
-        value === "Error: Read Failure" ||
-        value == null ||
-        typeof value !== "number" ||
-        Number.isNaN(value);
+      const isInvalid = typeof value !== "number" || !isFinite(value);
+      const sensorMessage = isInvalid ? "Error: Invalid or Missing Reading" : null;
 
-      readings[key] = value;
+      readings[key] = isInvalid ? null : value;
 
       const activeFailure = await notificationCollection.findOne({
         type: "SENSOR FAILURE",
         sensor: sensorName,
         resolved: false
       });
-
-      const sensorMessage = 
-      value === "Error: Read Failure" ? "Error: Read Failure" :
-      value === "Error: Disconnected" ? "Error: Disconnected" :
-      null;
 
       if (isInvalid && !activeFailure) {
         await notificationCollection.insertOne({
@@ -137,7 +129,6 @@ const handleSensorData = async (sensorData) => {
         console.warn(`❌ SENSOR FAILURE DETECTED: ${sensorName}`);
 
         // 🔔 SEND PUSH NOTIFICATION
-        // const tokens = await tokenCollection.find({}).toArray();
         const tokens = await getTokens()
 
         for (const device of tokens) {
