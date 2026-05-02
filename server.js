@@ -1,6 +1,3 @@
-// http://localhost:5000/api/actuators
-// http://localhost:5000/api/sensors
-
 const express = require("express");
 const cors = require("cors");
 const connectMongo = require("./mongo");
@@ -76,7 +73,8 @@ async function start() {
   await notificationCollection.createIndex({ is_read: 1 });
   await notificationCollection.createIndex({ created_at: -1 });
 
-  const rootRef = db.ref("/");
+  const sensorRef = db.ref("/sensorData");
+  const controlsRef = db.ref("/controls");
 
   tokenCollection = mongoDB.collection("device_tokens");
 
@@ -232,50 +230,18 @@ const handleActuatorData = async (controls) => {
   }
 };
 
-  // ----- Payload type checks -----
-  const isSensorPayload = (data) => 
-    data && typeof data === 'object' && !Array.isArray(data) &&
-    ("temperature" in data || "humidity" in data || "ammonia" in data || "lightLevel" in data);
-
-  const isActuatorPayload = (data) => 
-    data && typeof data === 'object' && !Array.isArray(data) &&
-    ("fans" in data || "heater" in data || "lightBrightness" in data);
-
-  // --- SNAPSHOT HANDLER ---
-  const handleSnapshot = async (data) => {
-    if (!data || typeof data !== 'object') return;
-
-    try {
-      // Process sensors (prioritize nested sensorData if it exists)
-      if (data.sensorData && isSensorPayload(data.sensorData)) {
-        await handleSensorData(data.sensorData);
-      } else if (isSensorPayload(data)) {
-        await handleSensorData(data);
-      }
-
-      // Process actuators (prioritize nested controls if it exists)
-      if (data.controls && isActuatorPayload(data.controls)) {
-        await handleActuatorData(data.controls);
-      } else if (isActuatorPayload(data)) {
-        await handleActuatorData(data);
-      }
-    } catch (err) {
-      console.error("⚠️ Failed to process snapshot branch:", err.message);
-    }
-  };
-
-  // --- REFINED LISTENERS ---
-  // Listening to specific nodes instead of root "/"
-  rootRef.on("child_added", async (snapshot) => {
+  sensorRef.on("value", async (snapshot) => {
     const data = snapshot.val();
-    console.log("🟢 New Firebase data:", data);
-    await handleSnapshot(data);
+    if (!data) return;
+    console.log("🔄 Sensor data:", data);
+    await handleSensorData(data);
   });
 
-  rootRef.on("child_changed", async (snapshot) => {
+  controlsRef.on("value", async (snapshot) => {
     const data = snapshot.val();
-    console.log("🔄 Updated Firebase data:", data);
-    await handleSnapshot(data);
+    if (!data) return;
+    console.log("🔄 Controls data:", data);
+    await handleActuatorData(data);
   });
   
   const PORT = 5000;
@@ -285,7 +251,9 @@ const handleActuatorData = async (controls) => {
 
   const shutdown = async (signal) => {
       console.log(`⚙️ ${signal} received — shutting down`);
-      rootRef.off();
+      // rootRef.off();
+      sensorRef.off();
+      controlsRef.off();
       await mongoDB.client.close();
       console.log("✅ MongoDB closed");
       process.exit(0);
@@ -378,8 +346,6 @@ app.get("/api/sensors", async (req, res) => {
       if (until) filter.timestamp.$lt = until;  
     }
 
-    // const filter = since ? { timestamp: { $gte: since } } : {};
-
     const sensors = await sensorCollection
       .find(filter)
       .sort({ timestamp: -1 })
@@ -409,10 +375,6 @@ app.get("/api/actuators", async (req, res) => {
       if (until) filter.timestamp.$lt = until;  
       if (id)    filter.actuator_id = id;
     }
-
-    // const filter = {};
-    // if (since) filter.timestamp = { $gte: since };
-    // if (id)    filter.actuator_id = id;
 
     const actuators = await actuatorCollection
       .find(filter)
